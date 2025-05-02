@@ -112,6 +112,11 @@ scheduler.add_job(calculate_fines, 'interval', days=1)
 scheduler.start()
 
 # Routes
+@app.route('/')
+def home():
+    logger.debug("Accessed root route")
+    return jsonify({"message": "Student Library Management System Backend"})
+    
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_frontend(path):
