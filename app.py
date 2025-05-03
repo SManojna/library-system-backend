@@ -15,7 +15,7 @@ import time
 
 load_dotenv()
 app = Flask(__name__)
-CORS(app, supports_credentials=True, origins=["https://68159fb2625710c7cd9131cd--keen-kheer-04fee3.netlify.app", "http://localhost:3000"],
+CORS(app, supports_credentials=True, origins=["https://keen-kheer-04fee3.netlify.app", "http://localhost:3000"],
      allow_headers=["Content-Type", "Authorization"], 
      expose_headers=["Set-Cookie"])
 
