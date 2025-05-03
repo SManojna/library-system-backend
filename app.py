@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify, session
 import os
 from flask_sqlalchemy import SQLAlchemy
-from flask_session import Session
+from flask_sessionstore import Session
 from datetime import datetime, timedelta, timezone
 import bcrypt
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -21,6 +21,7 @@ CORS(app, supports_credentials=True, origins=["https://68159fb2625710c7cd9131cd-
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+db = SQLAlchemy()
 # Database configuration
 database_url = os.environ.get('DATABASE_URL')
 if not database_url:
@@ -36,12 +37,12 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_timeout': 30,
 }
 # For Neon cloud deployment, uncomment the following:
-# app.config['SQLALCHEMY_ENGINE_OPTIONS']['connect_args']['sslmode'] = 'require'
+app.config['SQLALCHEMY_ENGINE_OPTIONS']['connect_args']['sslmode'] = 'require'
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'xYz9wV1uT0sR9qP8oN7mL6kJ5iH4gF3eD2cB1a')
-app.config['SESSION_TYPE'] = 'filesystem'
+app.config['SESSION_TYPE'] = 'sqlalchemy'
+app.config['SESSION_SQLALCHEMY'] = db
 app.config['SESSION_PERMANENT'] = False
 
-db = SQLAlchemy()
 try:
     db.init_app(app)
 except Exception as e:
