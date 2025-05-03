@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify, session
 import os
 from flask_sqlalchemy import SQLAlchemy
-from flask_sessionstore import Session
+from flask_session import Session
 from datetime import datetime, timedelta, timezone
 import bcrypt
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -42,6 +42,9 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'xYz9wV1uT0sR9qP8oN7mL6k
 app.config['SESSION_TYPE'] = 'sqlalchemy'
 app.config['SESSION_SQLALCHEMY'] = db
 app.config['SESSION_PERMANENT'] = False
+app.config['SESSION_COOKIE_SECURE'] = True  # Ensure cookie is sent over HTTPS
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
 try:
     db.init_app(app)
