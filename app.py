@@ -114,15 +114,14 @@ scheduler.start()
 # Routes
 @app.route('/')
 def home():
-    logger.debug("Accessed root route")
     return jsonify({"message": "Student Library Management System Backend"})
-    
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve_frontend(path):
-    if path != "" and os.path.exists(os.path.join('frontend/build', path)):
-        return send_from_directory('frontend/build', path)
-    return send_from_directory('frontend/build', 'index.html')
+
+# @app.route('/', defaults={'path': ''})
+# @app.route('/<path:path>')
+# def serve_frontend(path):
+#     if path != "" and os.path.exists(os.path.join('frontend/build', path)):
+#         return send_from_directory('frontend/build', path)
+#     return send_from_directory('frontend/build', 'index.html')
 
 @app.route('/api/register', methods=['POST'])
 def register():
