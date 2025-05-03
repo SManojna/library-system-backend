@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 app = Flask(__name__)
-CORS(app, supports_credentials=True, origins=["https://library-system-frontend.vercel.app", "http://localhost:3000"])
+CORS(app, supports_credentials=True, origins=["https://68159fb2625710c7cd9131cd--keen-kheer-04fee3.netlify.app", "http://localhost:3000"])
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
