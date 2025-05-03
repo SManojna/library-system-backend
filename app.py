@@ -15,7 +15,9 @@ import time
 
 load_dotenv()
 app = Flask(__name__)
-CORS(app, supports_credentials=True, origins=["https://68159fb2625710c7cd9131cd--keen-kheer-04fee3.netlify.app", "http://localhost:3000"])
+CORS(app, supports_credentials=True, origins=["https://68159fb2625710c7cd9131cd--keen-kheer-04fee3.netlify.app", "http://localhost:3000"],
+     allow_headers=["Content-Type", "Authorization"], 
+     expose_headers=["Set-Cookie"])
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -31,7 +33,7 @@ if database_url.startswith('postgres://'):
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'connect_args': {'connect_timeout': 10,'sslmode': 'require'},
+    'connect_args': {'connect_timeout': 10, 'sslmode': 'require'},
     'pool_size': 5,
     'max_overflow': 10,
     'pool_timeout': 30,
@@ -44,7 +46,7 @@ app.config['SESSION_SQLALCHEMY'] = db
 app.config['SESSION_PERMANENT'] = False
 app.config['SESSION_COOKIE_SECURE'] = True  # Ensure cookie is sent over HTTPS
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'
 
 try:
     db.init_app(app)
@@ -79,13 +81,15 @@ def health():
         return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
 # Test session endpoint
-@app.route('/test-session', methods=['GET', 'POST'])
-def test_session():
-    if request.method == 'POST':
-        session['test'] = request.json.get('value', 'default')
-        return jsonify({'message': 'Session set', 'value': session['test']}), 200
-    return jsonify({'value': session.get('test', 'not set')}), 200
-    
+@app.route('/api/session', methods=['GET'])
+def check_session():
+    if 'user_id' in session:
+        user = User.query.get(session['user_id'])
+        if user:
+            return jsonify({'logged_in': True, 'user': user.email}), 200
+    logger.error("Session check failed: No valid user_id in session")
+    return jsonify({'logged_in': False}), 401
+
 # Models
 class User(db.Model):
     __tablename__ = 'user'
@@ -314,8 +318,8 @@ def get_books():
 @login_required(role='student')
 @retry_db_operation()
 def get_book_status():
-    user_id = session['user_id']
     try:
+        user_id = session['user_id']
         books = Book.query.all()
         transactions = Transaction.query.filter_by(
             user_id=user_id
