@@ -449,9 +449,21 @@ def borrow_book():
         logger.error("Missing book_id")
         return jsonify({'error': 'Missing book_id'}), 400
     book = Book.query.get(data['book_id'])
-    if not book or book.available_copies == 0:
+    if not book:
+        logger.debug(f"Book not found: book_id={data['book_id']}")
+        return jsonify({'error': 'Book not found'}), 404
+    if book.available_copies == 0:
         logger.debug(f"Book unavailable: book_id={data['book_id']}")
         return jsonify({'error': 'Book unavailable'}), 400
+    # Check if user already borrowed this book
+    existing_transaction = Transaction.query.filter_by(
+        user_id=user_id,
+        book_id=data['book_id'],
+        status='borrowed'
+    ).first()
+    if existing_transaction:
+        logger.debug(f"User already borrowed book: book_id={data['book_id']}, user_id={user_id}")
+        return jsonify({'error': 'You have already borrowed this book'}), 400
     active_reservations = Reservation.query.filter_by(
         book_id=data['book_id'], status='active'
     ).count()
@@ -469,6 +481,7 @@ def borrow_book():
         transaction = Transaction(
             user_id=user_id,
             book_id=data['book_id'],
+            issue_date=datetime.now(timezone.utc).date(),
             due_date=due_date,
             status='borrowed'
         )
@@ -476,10 +489,18 @@ def borrow_book():
         db.session.commit()
         logger.debug(f"Book borrowed: book_id={data['book_id']} by user_id={user_id}")
         return jsonify({'message': 'Book borrowed successfully'}), 201
-    except Exception as e:
-        logger.error(f"Error borrowing book: {str(e)}")
+    except IntegrityError as e:
+        logger.error(f"Database integrity error borrowing book: {str(e)}")
         db.session.rollback()
-        return jsonify({'error': 'Failed to borrow book'}), 500
+        return jsonify({'error': 'Database error: Invalid user or book reference'}), 500
+    except OperationalError as e:
+        logger.error(f"Database connection error borrowing book: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': 'Database connection error'}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error borrowing book: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': 'Failed to borrow book', 'details': str(e)}), 500
 
 @app.route('/api/books/return', methods=['POST'])
 @login_required()
