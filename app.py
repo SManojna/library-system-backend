@@ -1,15 +1,17 @@
-from flask import Flask, request, jsonify, session, send_from_directory
+from flask import Flask, request, jsonify, session
 import os
 from flask_sqlalchemy import SQLAlchemy
 from flask_session import Session
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import bcrypt
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask_cors import CORS
 import logging
 import functools
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.sql import text
 from dotenv import load_dotenv
+import time
 
 load_dotenv()
 app = Flask(__name__)
@@ -19,15 +21,33 @@ CORS(app, supports_credentials=True, origins=["https://68159fb2625710c7cd9131cd-
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Database and session configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
+# Database configuration
+database_url = os.environ.get('DATABASE_URL')
+if not database_url:
+    raise ValueError("DATABASE_URL is not set in .env file")
+if database_url.startswith('postgres://'):
+    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'connect_args': {'connect_timeout': 10},
+    'pool_size': 5,
+    'max_overflow': 10,
+    'pool_timeout': 30,
+}
+# For Neon cloud deployment, uncomment the following:
+# app.config['SQLALCHEMY_ENGINE_OPTIONS']['connect_args']['sslmode'] = 'require'
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'xYz9wV1uT0sR9qP8oN7mL6kJ5iH4gF3eD2cB1a')
 app.config['SESSION_TYPE'] = 'filesystem'
 app.config['SESSION_PERMANENT'] = False
 
 db = SQLAlchemy()
-db.init_app(app)
+try:
+    db.init_app(app)
+except Exception as e:
+    logger.error(f"Failed to initialize database: {str(e)}")
+    raise
+
 Session(app)
 
 @app.before_request
@@ -36,6 +56,7 @@ def log_request():
 
 # Models
 class User(db.Model):
+    __tablename__ = 'user'
     user_id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
@@ -56,11 +77,11 @@ class Transaction(db.Model):
     transaction_id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.user_id'), nullable=False)
     book_id = db.Column(db.Integer, db.ForeignKey('book.book_id'), nullable=False)
-    issue_date = db.Column(db.Date, default=datetime.utcnow().date)
+    issue_date = db.Column(db.Date, default=lambda: datetime.now(timezone.utc).date)
     due_date = db.Column(db.Date, nullable=False)
     return_date = db.Column(db.Date)
     fine_amount = db.Column(db.Float, default=0.0)
-    status = db.Column(db.String(20), default='borrowed')  # borrowed, overdue, pending_approval, returned
+    status = db.Column(db.String(20), default='borrowed')
     user = db.relationship('User', backref='transactions')
     book = db.relationship('Book', backref='transactions')
 
@@ -68,8 +89,8 @@ class Reservation(db.Model):
     reservation_id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.user_id'), nullable=False)
     book_id = db.Column(db.Integer, db.ForeignKey('book.book_id'), nullable=False)
-    reservation_date = db.Column(db.Date, default=datetime.utcnow().date)
-    status = db.Column(db.String(20), default='active')  # active, cancelled
+    reservation_date = db.Column(db.Date, default=lambda: datetime.now(timezone.utc).date)
+    status = db.Column(db.String(20), default='active')
     user = db.relationship('User', backref='reservations')
     book = db.relationship('Book', backref='reservations')
 
@@ -97,11 +118,11 @@ def calculate_fines():
     with app.app_context():
         transactions = Transaction.query.filter(
             Transaction.return_date.is_(None),
-            Transaction.due_date < datetime.utcnow(),
+            Transaction.due_date < datetime.now(timezone.utc).date(),
             Transaction.status != 'pending_approval'
         ).all()
         for t in transactions:
-            days_overdue = (datetime.utcnow().date() - t.due_date).days
+            days_overdue = (datetime.now(timezone.utc).date() - t.due_date).days
             t.fine_amount = days_overdue * 1.0
             t.status = 'overdue' if days_overdue > 0 else t.status
             db.session.commit()
@@ -111,19 +132,70 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(calculate_fines, 'interval', days=1)
 scheduler.start()
 
+# Retry decorator
+def retry_db_operation(max_attempts=3, delay=1):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            attempts = 0
+            while attempts < max_attempts:
+                try:
+                    return func(*args, **kwargs)
+                except OperationalError as e:
+                    logger.error(f"Database operation failed: {str(e)}")
+                    attempts += 1
+                    if attempts == max_attempts:
+                        raise
+                    time.sleep(delay)
+                    logger.debug(f"Retrying database operation ({attempts}/{max_attempts})")
+            return None
+        return wrapper
+    return decorator
+
 # Routes
 @app.route('/')
 def home():
     return jsonify({"message": "Student Library Management System Backend"})
 
-# @app.route('/', defaults={'path': ''})
-# @app.route('/<path:path>')
-# def serve_frontend(path):
-#     if path != "" and os.path.exists(os.path.join('frontend/build', path)):
-#         return send_from_directory('frontend/build', path)
-#     return send_from_directory('frontend/build', 'index.html')
+@app.route('/api/test-db', methods=['GET'])
+@retry_db_operation()
+def test_db():
+    try:
+        result = db.session.execute(text('SELECT NOW()')).fetchone()
+        logger.debug(f"Database test query successful: {result}")
+        return jsonify({'message': 'Database connection successful', 'time': str(result[0])}), 200
+    except Exception as e:
+        logger.error(f"Database test error: {str(e)}")
+        return jsonify({'error': 'Database connection failed', 'details': str(e)}), 500
+
+@app.route('/api/test-user', methods=['POST'])
+@retry_db_operation()
+def test_user():
+    data = request.get_json()
+    logger.debug(f"Test user data: {data}")
+    if not data or 'email' not in data:
+        logger.error("Missing email in test-user request")
+        return jsonify({'error': 'Missing email'}), 400
+    try:
+        user = User.query.filter(User.email.ilike(data['email'])).first()
+        if not user:
+            logger.debug(f"No user found for email (case-insensitive): {data['email']}")
+            return jsonify({'error': 'User not found'}), 404
+        logger.debug(f"User found: {user.email}, name: {user.name}, role: {user.role}")
+        return jsonify({
+            'message': 'User found',
+            'user': {
+                'email': user.email,
+                'name': user.name,
+                'role': user.role
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"Test user error: {str(e)}")
+        return jsonify({'error': 'Failed to query user', 'details': str(e)}), 500
 
 @app.route('/api/register', methods=['POST'])
+@retry_db_operation()
 def register():
     data = request.get_json()
     logger.debug(f"Register data: {data}")
@@ -149,27 +221,33 @@ def register():
         return jsonify({'error': 'Failed to register user'}), 500
 
 @app.route('/api/login', methods=['POST'])
+@retry_db_operation()
 def login():
     data = request.get_json()
     logger.debug(f"Login data: {data}")
     if not data or 'email' not in data or 'password' not in data:
         logger.error("Invalid login payload")
         return jsonify({'error': 'Missing email or password'}), 400
-    user = User.query.filter_by(email=data['email']).first()
-    if not user:
-        logger.debug(f"No user found for email: {data['email']}")
-        return jsonify({'error': 'Invalid credentials'}), 401
     try:
-        if bcrypt.checkpw(data['password'].encode('utf-8'), user.password.encode('utf-8')):
+        logger.debug(f"Querying user with email (case-insensitive): {data['email']}")
+        user = User.query.filter(User.email.ilike(data['email'])).first()
+        if not user:
+            logger.debug(f"No user found for email (case-insensitive): {data['email']}")
+            return jsonify({'error': 'Invalid credentials'}), 401
+        logger.debug(f"User found: {user.email}")
+        logger.debug(f"Attempting password check for user: {user.email}")
+        password_match = bcrypt.checkpw(data['password'].encode('utf-8'), user.password.encode('utf-8'))
+        logger.debug(f"Password match result: {password_match}")
+        if password_match:
             session['user_id'] = user.user_id
-            logger.debug(f"Session created for user: {user.email}")
+            logger.debug(f"Session created for user: {user.email}, session['user_id']={session['user_id']}")
             return jsonify({'message': 'Login successful', 'role': user.role, 'name': user.name}), 200
         else:
             logger.debug(f"Password mismatch for user: {data['email']}")
             return jsonify({'error': 'Invalid credentials'}), 401
     except Exception as e:
         logger.error(f"Login error: {str(e)}")
-        return jsonify({'error': 'Login failed'}), 500
+        return jsonify({'error': 'An unexpected error occurred', 'details': str(e)}), 500
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
@@ -178,6 +256,7 @@ def logout():
     return jsonify({'message': 'Logout successful'}), 200
 
 @app.route('/api/books', methods=['GET'])
+@retry_db_operation()
 def get_books():
     search = request.args.get('search', '')
     try:
@@ -201,36 +280,29 @@ def get_books():
 
 @app.route('/api/books/status', methods=['GET'])
 @login_required(role='student')
+@retry_db_operation()
 def get_book_status():
     user_id = session['user_id']
     try:
-        # Fetch all books
         books = Book.query.all()
-        # Fetch user's active transactions
         transactions = Transaction.query.filter_by(
             user_id=user_id
         ).filter(Transaction.status != 'returned').all()
-        # Fetch user's active reservations
         reservations = Reservation.query.filter_by(
             user_id=user_id, status='active'
         ).all()
-        
         book_statuses = []
         for book in books:
             status = 'available'
-            # Check if the book is borrowed by the user
             if any(t.book_id == book.book_id for t in transactions):
                 status = 'borrowed'
-            # Check if the book is reserved by the user
             elif any(r.book_id == book.book_id for r in reservations):
                 status = 'reserved'
-            # Check if all copies are reserved
             active_reservations = Reservation.query.filter_by(
                 book_id=book.book_id, status='active'
             ).count()
             if book.available_copies <= active_reservations and status != 'reserved':
                 status = 'all_reserved'
-                
             book_statuses.append({
                 'book_id': book.book_id,
                 'status': status,
@@ -244,6 +316,7 @@ def get_book_status():
 
 @app.route('/api/books', methods=['POST'])
 @login_required(role='admin')
+@retry_db_operation()
 def add_book():
     user_id = session['user_id']
     data = request.get_json()
@@ -267,11 +340,6 @@ def add_book():
         db.session.add(new_book)
         db.session.commit()
         logger.debug(f"Book added: {data['title']} (ISBN: {data['isbn']})")
-        book = Book.query.filter_by(isbn=data['isbn']).first()
-        if book:
-            logger.debug(f"Verified book in DB: {book.title} (book_id: {book.book_id})")
-        else:
-            logger.error("Book not found in DB after commit")
         return jsonify({'message': 'Book added successfully'}), 201
     except Exception as e:
         logger.error(f"Error adding book: {str(e)}")
@@ -280,6 +348,7 @@ def add_book():
 
 @app.route('/api/books/<int:book_id>', methods=['PUT'])
 @login_required(role='admin')
+@retry_db_operation()
 def edit_book(book_id):
     user_id = session['user_id']
     data = request.get_json()
@@ -317,6 +386,7 @@ def edit_book(book_id):
 
 @app.route('/api/books/<int:book_id>', methods=['DELETE'])
 @login_required(role='admin')
+@retry_db_operation()
 def delete_book(book_id):
     user_id = session['user_id']
     book = Book.query.get(book_id)
@@ -335,6 +405,7 @@ def delete_book(book_id):
 
 @app.route('/api/books/borrow', methods=['POST'])
 @login_required()
+@retry_db_operation()
 def borrow_book():
     user_id = session['user_id']
     data = request.get_json()
@@ -345,24 +416,20 @@ def borrow_book():
     if not book or book.available_copies == 0:
         logger.debug(f"Book unavailable: book_id={data['book_id']}")
         return jsonify({'error': 'Book unavailable'}), 400
-    # Check active reservations for the book
     active_reservations = Reservation.query.filter_by(
         book_id=data['book_id'], status='active'
     ).count()
-    # Check if the user has an active reservation for this book
     user_reservation = Reservation.query.filter_by(
         book_id=data['book_id'], user_id=user_id, status='active'
     ).first()
-    # Allow borrowing if there are unreserved copies or the user has a reservation
     if book.available_copies <= active_reservations and not user_reservation:
         logger.debug(f"All copies reserved: book_id={data['book_id']}")
         return jsonify({'error': 'All copies are reserved by other users'}), 403
     try:
-        # Cancel the user's reservation if they are borrowing
         if user_reservation:
             user_reservation.status = 'cancelled'
         book.available_copies -= 1
-        due_date = datetime.utcnow().date() + timedelta(days=14)
+        due_date = datetime.now(timezone.utc).date() + timedelta(days=14)
         transaction = Transaction(
             user_id=user_id,
             book_id=data['book_id'],
@@ -372,11 +439,6 @@ def borrow_book():
         db.session.add(transaction)
         db.session.commit()
         logger.debug(f"Book borrowed: book_id={data['book_id']} by user_id={user_id}")
-        trans = Transaction.query.filter_by(user_id=user_id, book_id=data['book_id'], return_date=None).first()
-        if trans:
-            logger.debug(f"Verified transaction in DB: transaction_id={trans.transaction_id}")
-        else:
-            logger.error("Transaction not found in DB after commit")
         return jsonify({'message': 'Book borrowed successfully'}), 201
     except Exception as e:
         logger.error(f"Error borrowing book: {str(e)}")
@@ -385,6 +447,7 @@ def borrow_book():
 
 @app.route('/api/books/return', methods=['POST'])
 @login_required()
+@retry_db_operation()
 def return_book():
     user_id = session['user_id']
     data = request.get_json()
@@ -399,9 +462,9 @@ def return_book():
         logger.debug(f"Invalid transaction: transaction_id={data['transaction_id']}")
         return jsonify({'error': 'Invalid or already returned transaction'}), 400
     try:
-        transaction.return_date = datetime.utcnow().date()
+        transaction.return_date = datetime.now(timezone.utc).date()
         transaction.status = 'pending_approval'
-        transaction.fine_amount = 0.0  # Fine calculated on approval
+        transaction.fine_amount = 0.0
         book = Book.query.get(transaction.book_id)
         book.available_copies += 1
         db.session.commit()
@@ -417,6 +480,7 @@ def return_book():
 
 @app.route('/api/transactions/approve', methods=['POST'])
 @login_required(role='admin')
+@retry_db_operation()
 def approve_return():
     user_id = session['user_id']
     data = request.get_json()
@@ -447,6 +511,7 @@ def approve_return():
 
 @app.route('/api/books/reserve', methods=['POST'])
 @login_required(role='student')
+@retry_db_operation()
 def reserve_book():
     user_id = session['user_id']
     data = request.get_json()
@@ -460,7 +525,6 @@ def reserve_book():
     if book.available_copies > 0:
         logger.debug(f"Book is available: book_id={data['book_id']}")
         return jsonify({'error': 'Book is currently available for borrowing'}), 400
-    # Check if user already has an active reservation for this book
     existing_reservation = Reservation.query.filter_by(
         user_id=user_id, book_id=data['book_id'], status='active'
     ).first()
@@ -471,7 +535,7 @@ def reserve_book():
         reservation = Reservation(
             user_id=user_id,
             book_id=data['book_id'],
-            reservation_date=datetime.utcnow().date(),
+            reservation_date=datetime.now(timezone.utc).date(),
             status='active'
         )
         db.session.add(reservation)
@@ -485,6 +549,7 @@ def reserve_book():
 
 @app.route('/api/reservations', methods=['GET'])
 @login_required()
+@retry_db_operation()
 def get_reservations():
     user_id = session['user_id']
     user = User.query.get(user_id)
@@ -511,6 +576,7 @@ def get_reservations():
 
 @app.route('/api/transactions', methods=['GET'])
 @login_required()
+@retry_db_operation()
 def get_transactions():
     user_id = session['user_id']
     user = User.query.get(user_id)
@@ -537,7 +603,6 @@ def get_transactions():
         logger.error(f"Error fetching transactions: {str(e)}")
         return jsonify({'error': 'Failed to fetch transactions'}), 500
 
-# Error handler
 @app.errorhandler(Exception)
 def handle_error(error):
     logger.error(f"Unhandled error: {str(error)}")
@@ -546,4 +611,5 @@ def handle_error(error):
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+        logger.debug(f"Database connected: {app.config['SQLALCHEMY_DATABASE_URI']}")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=True)
