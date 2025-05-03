@@ -31,13 +31,13 @@ if database_url.startswith('postgres://'):
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'connect_args': {'connect_timeout': 10},
+    'connect_args': {'connect_timeout': 10,'sslmode': 'require'},
     'pool_size': 5,
     'max_overflow': 10,
     'pool_timeout': 30,
 }
 # For Neon cloud deployment, uncomment the following:
-app.config['SQLALCHEMY_ENGINE_OPTIONS']['connect_args']['sslmode'] = 'require'
+# app.config['SQLALCHEMY_ENGINE_OPTIONS']['connect_args']['sslmode'] = 'require'
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'xYz9wV1uT0sR9qP8oN7mL6kJ5iH4gF3eD2cB1a')
 app.config['SESSION_TYPE'] = 'sqlalchemy'
 app.config['SESSION_SQLALCHEMY'] = db
@@ -52,12 +52,40 @@ except Exception as e:
     logger.error(f"Failed to initialize database: {str(e)}")
     raise
 
+# Create session table
+with app.app_context():
+    try:
+        db.create_all()
+        logger.info("Database tables created successfully")
+    except Exception as e:
+        logger.error(f"Failed to create database tables: {str(e)}")
+        raise
 Session(app)
 
+# Middleware to log session data
 @app.before_request
-def log_request():
-    logger.debug(f"Incoming request: {request.method} {request.path} {request.get_json(silent=True)}")
+def log_session():
+    logger.debug(f"Session data: {session}")
+    logger.debug(f"Request headers: {request.headers}")
 
+# Health check endpoint
+@app.route('/health', methods=['GET'])
+def health():
+    try:
+        db.session.execute(text('SELECT 1'))
+        return jsonify({'status': 'healthy', 'database': 'connected'}), 200
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
+
+# Test session endpoint
+@app.route('/test-session', methods=['GET', 'POST'])
+def test_session():
+    if request.method == 'POST':
+        session['test'] = request.json.get('value', 'default')
+        return jsonify({'message': 'Session set', 'value': session['test']}), 200
+    return jsonify({'value': session.get('test', 'not set')}), 200
+    
 # Models
 class User(db.Model):
     __tablename__ = 'user'
